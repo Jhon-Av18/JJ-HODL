@@ -11,37 +11,45 @@ import {
 } from 'react-native';
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase/firebaseConfig';
+import {
+  COLORES,
+  NIVELES,
+  cargarDigimon,
+  tierDe,
+  nivelDe,
+  valorDe,
+  alAzar,
+} from '../digimonApi';
 
 const MONEDAS_INICIALES = 100;
-const COSTO_POKEBOLA = 10;
+const COSTO_HUEVO = 10;
 const BONO_DIARIO = 50;
 const UN_DIA = 24 * 60 * 60 * 1000;
-const TOTAL_POKEMON = 1025;
+const FUSION = 3; // cuántos Digimon del mismo nivel se necesitan para digievolucionar
 
-const SPRITE = (id) =>
-  `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
-const ARTWORK = (id) =>
-  `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`;
+// Probabilidad (en %) de que un Digihuevo traiga cada nivel, de Fresh a Ultimate.
+// Mega no sale de los huevos: solo se consigue digievolucionando.
+const PESOS = [35, 30, 22, 10, 3];
 
-// La rareza depende de la experiencia base que da PokeAPI
-const obtenerRareza = (exp) => {
-  if (exp >= 260) return { nombre: 'Legendario', color: '#d4a017', prob: 0.2 };
-  if (exp >= 180) return { nombre: 'Épico', color: '#8e44ad', prob: 0.4 };
-  if (exp >= 100) return { nombre: 'Raro', color: '#2980b9', prob: 0.65 };
-  return { nombre: 'Común', color: '#7f8c8d', prob: 0.9 };
+const tierAlAzar = () => {
+  let r = Math.random() * 100;
+  for (let i = 0; i < PESOS.length; i++) {
+    if (r < PESOS[i]) return i;
+    r -= PESOS[i];
+  }
+  return 0;
 };
-
-const precioVenta = (exp) => Math.max(1, Math.floor(exp / 8));
 
 export default function Original() {
   const uid = auth.currentUser?.uid;
 
+  const [lista, setLista] = useState([]);
   const [monedas, setMonedas] = useState(0);
   const [coleccion, setColeccion] = useState([]);
   const [ultimoBono, setUltimoBono] = useState(null);
   const [resultado, setResultado] = useState(null);
   const [cargando, setCargando] = useState(true);
-  const [lanzando, setLanzando] = useState(false);
+  const [ocupado, setOcupado] = useState(false);
 
   useEffect(() => {
     if (!uid) {
@@ -50,12 +58,15 @@ export default function Original() {
     }
     const cargar = async () => {
       try {
+        setLista(await cargarDigimon());
+
         const docRef = doc(db, 'usuarios', uid);
         const snap = await getDoc(docRef);
         if (snap.exists() && snap.data().monedas !== undefined) {
           const data = snap.data();
           setMonedas(data.monedas);
-          setColeccion(data.coleccion || []);
+          // Ignoramos datos viejos que no tengan la forma esperada
+          setColeccion((data.coleccion || []).filter((d) => d && d.name && d.level));
           setUltimoBono(data.ultimoBono || null);
         } else {
           await setDoc(
@@ -74,40 +85,41 @@ export default function Original() {
     cargar();
   }, [uid]);
 
-  const lanzarPokebola = async () => {
-    if (lanzando) return;
-    if (monedas < COSTO_POKEBOLA) {
-      Alert.alert('Sin monedas', 'Reclama tu bono diario o vende algún Pokémon.');
+  // Guarda en Firestore y actualiza la pantalla
+  const guardar = async (nuevasMonedas, nuevaColeccion, extra = {}) => {
+    await updateDoc(doc(db, 'usuarios', uid), {
+      monedas: nuevasMonedas,
+      coleccion: nuevaColeccion,
+      ...extra,
+    });
+    setMonedas(nuevasMonedas);
+    setColeccion(nuevaColeccion);
+  };
+
+  const abrirHuevo = async () => {
+    if (ocupado) return;
+    if (!lista.length) {
+      Alert.alert('Sin catálogo', 'Aún no se cargó la lista de Digimon.');
       return;
     }
-    setLanzando(true);
+    if (monedas < COSTO_HUEVO) {
+      Alert.alert('Sin monedas', 'Reclama tu bono diario o libera algún Digimon.');
+      return;
+    }
+    setOcupado(true);
     setResultado(null);
     try {
-      const id = Math.floor(Math.random() * TOTAL_POKEMON) + 1;
-      const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
-      const data = await res.json();
-      const exp = data.base_experience || 50;
-      const rareza = obtenerRareza(exp);
-      const atrapado = Math.random() < rareza.prob;
-
-      const nuevasMonedas = monedas - COSTO_POKEBOLA;
-      const nuevaColeccion = atrapado
-        ? [...coleccion, { id: data.id, nombre: data.name, exp }]
-        : coleccion;
-
-      await updateDoc(doc(db, 'usuarios', uid), {
-        monedas: nuevasMonedas,
-        coleccion: nuevaColeccion,
-      });
-
-      setMonedas(nuevasMonedas);
-      setColeccion(nuevaColeccion);
-      setResultado({ id: data.id, nombre: data.name, rareza, atrapado });
+      const tier = tierAlAzar();
+      const candidatos = lista.filter((d) => tierDe(d.level) === tier);
+      const d = alAzar(candidatos.length ? candidatos : lista);
+      const nuevo = { name: d.name, img: d.img, level: d.level };
+      await guardar(monedas - COSTO_HUEVO, [...coleccion, nuevo]);
+      setResultado({ tipo: 'huevo', digimon: nuevo });
     } catch (e) {
       console.error(e);
-      Alert.alert('Error', 'La pokébola no pudo lanzarse. Intenta de nuevo.');
+      Alert.alert('Error', 'No se pudo abrir el Digihuevo.');
     }
-    setLanzando(false);
+    setOcupado(false);
   };
 
   const reclamarBono = async () => {
@@ -121,12 +133,7 @@ export default function Original() {
     }
     try {
       const fecha = new Date(ahora).toISOString();
-      const nuevasMonedas = monedas + BONO_DIARIO;
-      await updateDoc(doc(db, 'usuarios', uid), {
-        monedas: nuevasMonedas,
-        ultimoBono: fecha,
-      });
-      setMonedas(nuevasMonedas);
+      await guardar(monedas + BONO_DIARIO, coleccion, { ultimoBono: fecha });
       setUltimoBono(fecha);
       Alert.alert('¡Bono reclamado!', `Ganaste ${BONO_DIARIO} monedas.`);
     } catch (e) {
@@ -135,30 +142,72 @@ export default function Original() {
     }
   };
 
-  const vender = (indice) => {
-    const p = coleccion[indice];
-    const precio = precioVenta(p.exp);
+  const ejecutarFusion = async (tier) => {
+    setOcupado(true);
+    setResultado(null);
+    try {
+      const indices = coleccion
+        .map((d, i) => ({ d, i }))
+        .filter((x) => tierDe(x.d.level) === tier)
+        .slice(0, FUSION)
+        .map((x) => x.i);
+      if (indices.length < FUSION) {
+        setOcupado(false);
+        return;
+      }
+      const candidatos = lista.filter((d) => tierDe(d.level) === tier + 1);
+      if (!candidatos.length) {
+        Alert.alert('Error', 'No hay Digimon del siguiente nivel en el catálogo.');
+        setOcupado(false);
+        return;
+      }
+      const d = alAzar(candidatos);
+      const nuevo = { name: d.name, img: d.img, level: d.level };
+      const restante = coleccion.filter((_, i) => !indices.includes(i));
+      await guardar(monedas, [...restante, nuevo]);
+      setResultado({ tipo: 'fusion', digimon: nuevo });
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'No se pudo completar la digievolución.');
+    }
+    setOcupado(false);
+  };
+
+  const fusionar = (tier) => {
+    if (ocupado) return;
     Alert.alert(
-      `Vender ${p.nombre.toUpperCase()}`,
-      `Recibirás ${precio} monedas. ¿Quieres venderlo o lo guardas (HODL)?`,
+      'Digievolución',
+      `Se usarán ${FUSION} Digimon de nivel ${NIVELES[tier].etiqueta} para obtener uno de nivel ${NIVELES[tier + 1].etiqueta}. ¿Continuar?`,
       [
-        { text: 'Guardar', style: 'cancel' },
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Digievolucionar', onPress: () => ejecutarFusion(tier) },
+      ]
+    );
+  };
+
+  const liberar = (indice) => {
+    if (ocupado) return;
+    const d = coleccion[indice];
+    const valor = valorDe(d.level);
+    Alert.alert(
+      `Liberar a ${d.name}`,
+      `Recibirás ${valor} monedas. ¿Lo liberas o lo conservas?`,
+      [
+        { text: 'Conservar', style: 'cancel' },
         {
-          text: 'Vender',
+          text: 'Liberar',
           onPress: async () => {
+            setOcupado(true);
             try {
-              const nuevaColeccion = coleccion.filter((_, i) => i !== indice);
-              const nuevasMonedas = monedas + precio;
-              await updateDoc(doc(db, 'usuarios', uid), {
-                monedas: nuevasMonedas,
-                coleccion: nuevaColeccion,
-              });
-              setColeccion(nuevaColeccion);
-              setMonedas(nuevasMonedas);
+              await guardar(
+                monedas + valor,
+                coleccion.filter((_, i) => i !== indice)
+              );
             } catch (e) {
               console.error(e);
-              Alert.alert('Error', 'No se pudo vender.');
+              Alert.alert('Error', 'No se pudo liberar.');
             }
+            setOcupado(false);
           },
         },
       ]
@@ -168,125 +217,197 @@ export default function Original() {
   if (cargando) {
     return (
       <View style={styles.centro}>
-        <ActivityIndicator size="large" />
+        <ActivityIndicator size="large" color={COLORES.cian} />
       </View>
     );
   }
 
-  const unicos = new Set(coleccion.map((p) => p.id)).size;
-  const valorColeccion = coleccion.reduce((t, p) => t + precioVenta(p.exp), 0);
+  const conteo = [0, 0, 0, 0, 0, 0];
+  coleccion.forEach((d) => {
+    conteo[tierDe(d.level)] += 1;
+  });
+  const unicos = new Set(coleccion.map((d) => d.name)).size;
+  const ordenada = coleccion
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => tierDe(b.d.level) - tierDe(a.d.level));
 
   return (
     <ScrollView contentContainerStyle={styles.contenedor}>
-      <Text style={styles.titulo}>Pokéhodl</Text>
+      <Text style={styles.titulo}>DIGIEVOLUCIÓN</Text>
 
       <View style={styles.resumen}>
         <Text style={styles.resumenTexto}>🪙 Monedas: {monedas}</Text>
+        <Text style={styles.resumenTexto}>🎴 Digimon: {coleccion.length}</Text>
         <Text style={styles.resumenTexto}>
-          📖 Pokédex: {unicos} / {TOTAL_POKEMON}
-        </Text>
-        <Text style={styles.resumenTexto}>
-          💎 Valor de tu colección: {valorColeccion} monedas
+          📖 Digidex: {unicos} / {lista.length}
         </Text>
       </View>
 
       <View style={styles.fila}>
         <TouchableOpacity
-          style={[styles.boton, { backgroundColor: '#e74c3c' }]}
-          onPress={lanzarPokebola}
-          disabled={lanzando}
+          style={[styles.boton, { backgroundColor: COLORES.cian }]}
+          onPress={abrirHuevo}
+          disabled={ocupado}
         >
           <Text style={styles.botonTexto}>
-            {lanzando ? 'Lanzando...' : `Lanzar pokébola (${COSTO_POKEBOLA})`}
+            {ocupado ? 'PROCESANDO...' : `🥚 DIGIHUEVO (${COSTO_HUEVO})`}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.boton, { backgroundColor: '#27ae60' }]}
+          style={[styles.boton, { backgroundColor: COLORES.naranja }]}
           onPress={reclamarBono}
         >
-          <Text style={styles.botonTexto}>Bono diario (+{BONO_DIARIO})</Text>
+          <Text style={styles.botonTexto}>BONO DIARIO +{BONO_DIARIO}</Text>
         </TouchableOpacity>
       </View>
 
-      {lanzando && <ActivityIndicator style={{ marginTop: 20 }} size="large" />}
+      {ocupado && <ActivityIndicator style={{ marginTop: 16 }} color={COLORES.cian} />}
 
-      {resultado && !lanzando && (
-        <View style={[styles.encuentro, { borderColor: resultado.rareza.color }]}>
-          <Image source={{ uri: ARTWORK(resultado.id) }} style={styles.imagenGrande} />
-          <Text style={styles.nombreGrande}>
-            #{resultado.id} {resultado.nombre.toUpperCase()}
+      {resultado && !ocupado && (
+        <View
+          style={[styles.resultado, { borderColor: nivelDe(resultado.digimon.level).color }]}
+        >
+          <Text style={styles.resultadoTitulo}>
+            {resultado.tipo === 'huevo'
+              ? '🥚 ¡El Digihuevo eclosionó!'
+              : '🧬 ¡Digievolución exitosa!'}
           </Text>
-          <Text style={{ color: resultado.rareza.color, fontWeight: 'bold' }}>
-            {resultado.rareza.nombre} · {Math.round(resultado.rareza.prob * 100)}% de captura
-          </Text>
-          <Text style={resultado.atrapado ? styles.atrapado : styles.escapo}>
-            {resultado.atrapado ? '🎉 ¡Lo atrapaste!' : '💨 ¡Se escapó!'}
+          <Image source={{ uri: resultado.digimon.img }} style={styles.imagenGrande} />
+          <Text style={styles.nombreGrande}>{resultado.digimon.name}</Text>
+          <Text style={{ color: nivelDe(resultado.digimon.level).color, fontWeight: 'bold' }}>
+            {nivelDe(resultado.digimon.level).emoji} {resultado.digimon.level}
           </Text>
         </View>
       )}
 
-      <Text style={styles.subtitulo}>Mi colección ({coleccion.length})</Text>
+      <Text style={styles.seccion}>🧬 Laboratorio de digievolución</Text>
+      <Text style={styles.ayuda}>
+        Junta {FUSION} Digimon del mismo nivel para obtener uno del nivel siguiente. Los Mega
+        solo se consiguen así.
+      </Text>
+      {NIVELES.map((n) => {
+        const cant = conteo[n.tier];
+        const lleno = cant >= FUSION;
+        return (
+          <View key={n.tier} style={[styles.filaNivel, { borderColor: n.color }]}>
+            <Text style={[styles.nivelNombre, { color: n.color }]}>
+              {n.emoji} {n.etiqueta}
+            </Text>
+            <Text style={styles.nivelCant}>
+              {n.tier < 5 ? `${Math.min(cant, 99)} (${Math.min(cant, FUSION)}/${FUSION})` : cant}
+            </Text>
+            {n.tier < 5 ? (
+              <TouchableOpacity
+                style={[styles.botonFusion, { backgroundColor: lleno ? n.color : COLORES.borde }]}
+                onPress={() => fusionar(n.tier)}
+                disabled={!lleno || ocupado}
+              >
+                <Text style={[styles.botonFusionTexto, { color: lleno ? COLORES.fondo : COLORES.gris }]}>
+                  FUSIONAR
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.maximo}>Nivel máximo</Text>
+            )}
+          </View>
+        );
+      })}
+
+      <Text style={styles.seccion}>Mi colección ({coleccion.length})</Text>
       {coleccion.length === 0 ? (
-        <Text style={{ textAlign: 'center' }}>
-          Aún no tienes Pokémon. ¡Lanza tu primera pokébola!
-        </Text>
+        <Text style={styles.vacio}>Aún no tienes Digimon. ¡Abre tu primer Digihuevo!</Text>
       ) : (
         <View style={styles.grilla}>
-          {coleccion.map((p, i) => {
-            const rareza = obtenerRareza(p.exp);
+          {ordenada.map(({ d, i }) => {
+            const nivel = nivelDe(d.level);
             return (
               <TouchableOpacity
-                key={`${p.id}-${i}`}
-                style={[styles.carta, { borderColor: rareza.color }]}
-                onPress={() => vender(i)}
+                key={`${d.name}-${i}`}
+                style={[styles.carta, { borderColor: nivel.color }]}
+                onPress={() => liberar(i)}
               >
-                <Image source={{ uri: SPRITE(p.id) }} style={styles.sprite} />
+                <Image source={{ uri: d.img }} style={styles.sprite} />
                 <Text style={styles.cartaNombre} numberOfLines={1}>
-                  {p.nombre}
+                  {d.name}
                 </Text>
-                <Text style={{ color: rareza.color, fontSize: 11 }}>{rareza.nombre}</Text>
-                <Text style={{ fontSize: 11 }}>🪙 {precioVenta(p.exp)}</Text>
+                <Text style={{ color: nivel.color, fontSize: 11 }}>{d.level}</Text>
+                <Text style={{ color: COLORES.gris, fontSize: 11 }}>🪙 {nivel.valor}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
       )}
-      <Text style={styles.pista}>Toca un Pokémon para venderlo.</Text>
+      <Text style={styles.pista}>Toca un Digimon para liberarlo por monedas.</Text>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  contenedor: { padding: 20, paddingTop: 50, backgroundColor: '#fff' },
-  centro: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  titulo: { fontSize: 26, fontWeight: 'bold', textAlign: 'center', marginBottom: 15 },
-  subtitulo: { fontSize: 18, fontWeight: 'bold', marginTop: 20, marginBottom: 10 },
-  resumen: { backgroundColor: 'aliceblue', padding: 15, borderRadius: 10, marginBottom: 15 },
-  resumenTexto: { fontSize: 16, marginBottom: 4 },
-  fila: { flexDirection: 'row', gap: 10 },
-  boton: { flex: 1, padding: 12, borderRadius: 8, alignItems: 'center' },
-  botonTexto: { color: 'white', fontWeight: 'bold', textAlign: 'center' },
-  encuentro: {
-    marginTop: 20,
-    borderWidth: 2,
-    borderRadius: 12,
-    padding: 15,
+  contenedor: { padding: 18, paddingTop: 50, backgroundColor: COLORES.fondo },
+  centro: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: COLORES.fondo,
   },
-  imagenGrande: { width: 160, height: 160 },
-  nombreGrande: { fontSize: 20, fontWeight: 'bold', marginTop: 5 },
-  atrapado: { color: 'green', fontSize: 18, marginTop: 8 },
-  escapo: { color: 'crimson', fontSize: 18, marginTop: 8 },
+  titulo: {
+    fontSize: 26,
+    fontWeight: 'bold',
+    color: COLORES.cian,
+    textAlign: 'center',
+    letterSpacing: 3,
+    marginBottom: 14,
+  },
+  resumen: {
+    backgroundColor: COLORES.panel,
+    borderWidth: 1,
+    borderColor: COLORES.borde,
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 14,
+  },
+  resumenTexto: { color: COLORES.texto, fontSize: 15, marginBottom: 3 },
+  fila: { flexDirection: 'row', gap: 10 },
+  boton: { flex: 1, padding: 13, borderRadius: 10, alignItems: 'center' },
+  botonTexto: { color: COLORES.fondo, fontWeight: 'bold', fontSize: 12, textAlign: 'center' },
+  resultado: {
+    marginTop: 18,
+    borderWidth: 2,
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'center',
+    backgroundColor: COLORES.panel,
+  },
+  resultadoTitulo: { color: COLORES.texto, fontWeight: 'bold', fontSize: 16 },
+  imagenGrande: { width: 150, height: 150, resizeMode: 'contain', marginVertical: 10 },
+  nombreGrande: { color: COLORES.texto, fontSize: 22, fontWeight: 'bold' },
+  seccion: { color: COLORES.cian, fontSize: 17, fontWeight: 'bold', marginTop: 24, marginBottom: 8 },
+  ayuda: { color: COLORES.gris, marginBottom: 10 },
+  filaNivel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+    backgroundColor: COLORES.panel,
+  },
+  nivelNombre: { flex: 1, fontWeight: 'bold' },
+  nivelCant: { color: COLORES.texto, marginRight: 10 },
+  botonFusion: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8 },
+  botonFusionTexto: { fontWeight: 'bold', fontSize: 11 },
+  maximo: { color: COLORES.gris, fontSize: 11 },
   grilla: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center' },
   carta: {
-    width: '30%',
+    width: '31%',
     borderWidth: 2,
     borderRadius: 10,
     padding: 6,
     alignItems: 'center',
-    backgroundColor: '#fafafa',
+    backgroundColor: COLORES.panel,
   },
-  sprite: { width: 64, height: 64 },
-  cartaNombre: { fontSize: 12, fontWeight: 'bold' },
-  pista: { textAlign: 'center', color: '#888', marginTop: 12, marginBottom: 30 },
+  sprite: { width: 64, height: 64, resizeMode: 'contain' },
+  cartaNombre: { color: COLORES.texto, fontSize: 12, fontWeight: 'bold' },
+  vacio: { color: COLORES.gris, textAlign: 'center' },
+  pista: { color: COLORES.gris, textAlign: 'center', marginTop: 12, marginBottom: 30 },
 });
